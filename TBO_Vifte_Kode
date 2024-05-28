@@ -1,0 +1,215 @@
+
+const int typeValgPin = 10;  //Pin som leser av spak som velger modus på viften - manuell eller automatisk
+const int tidKnappPin = 11;  //Pin for knappen som brukes for å velge tidsinnstillingedr
+const int motorPin = 12;     // Pin som brukes for å styre motor
+const int diodePins[3] = {2, 3, 4};  //Pin for diodene som brukes for å representere nedtellingen 
+
+bool typeValgStatus;   //Variabel som representerer modus som en boolsk verdi - manuel(false) - automatisk (true)
+bool erMotorFerdig = true; //Variabel som setter lik True når motoren skal forbli av - etter manuell styring med timer som har gått ut
+int antTrykk = 0; //Antall ganger tidsinnstillingsknappen er trykket
+unsigned long timerFerdig = 0L; //Variabel som holder styr på når nedtellingen skal være ferdig
+
+const int MQ135_SENSOR = A0; //MQ-135 gasssensor - leser av analoge verdier på luftkvalitet 
+const int Luftkvalitet_Grense = 500; //Grense for god kvalitet på luften - altså hvor høy konsentrasjon er dårlig luft 
+
+long venteTid = 10* 60 * 1000; //Hvor mye skal nedtellingen økes med per klikk - 10 minutter
+
+void setup() {
+  Serial.begin(9600);
+
+//Spak og knapp settet til pullUp
+//Sensor settes til input 
+//Motoren settes til output 
+  pinMode(typeValgPin, INPUT_PULLUP);
+  pinMode(tidKnappPin, INPUT_PULLUP);
+  pinMode(MQ135_SENSOR, INPUT);
+  pinMode(motorPin, OUTPUT);
+  
+//Alle diodene settes til Output 
+  for (int i = 0; i < 3; i++) {
+    pinMode(diodePins[i], OUTPUT);
+  }
+
+
+}
+
+//Returnerer true dersom tidsinnstillingsknapen er trykket (leser LOW) og vice versa
+bool sjekkKnappTid(){
+  if (digitalRead(tidKnappPin) == LOW){
+    return true;
+  }
+  return false;
+}
+
+//Oppdaterer antall klikk variabel
+//Dersom antall trykk er mer enn 3, så settes den tilbake til 0 og nedtellinge tilbakestilles(settes til 0)
+void oppdaterAntKlikket(){
+  antTrykk++;
+  if(antTrykk > 3){
+    antTrykk = 0;
+    timerFerdig = 0;
+  }
+}
+
+//Oppdaterer klikk etter hvor mange ganger ventetiden er delelig på resterende tid - altså hvor mange "ventetid" gjennstår
+//Sjekker først om det finnes en nedtelling, altså den ikke er 0, slik at antTrykk ikke blir satt til ett negativt tall
+//Oppdaterer deretter antall klikk
+void justerKlikkEtterTid(){
+  if (timerFerdig > 0) {
+    antTrykk = (timerFerdig - millis() + venteTid)/venteTid;
+  }
+}
+
+//Oppdaterer antall dioder etter antall klikk 
+//SLår først av alle diodene, og deretter slår en og en på til det er gjort like mange ganger som antall klikk
+void oppdaterLys(){
+  for (int i = 0; i < 3; i++){
+    digitalWrite(diodePins[i],LOW);
+  }
+  for (int i = 0; i < antTrykk; i++){
+        digitalWrite(diodePins[i],HIGH);
+
+  }
+}
+
+//Sjekker om knappen er trykket ved å kalle på funksjonen sjekkKnappTid
+//Hvis det stemmer, så oppdateres variabel for antall klikket ved funksjonen "oppdaterAntKlikket"
+//Deretter oppdateres lys nå som antKlikket er oppdatert
+//Og så blir ny slutttid for nedtelling satt
+//Dersom modus på viften er manuell, og så vil den også sette erMotorFerdig til false igjen slik at motoren slår seg på igjen selv om den er helt av
+//Legger på en delay for å ha en debounce, slik at det ikke registreres 4 klikk hver gang knappen klikkes
+void erKnappTrykket(){
+  if(sjekkKnappTid()){
+    oppdaterAntKlikket();
+    oppdaterLys();
+    settTimer();
+    if(!typeValgStatus){
+      erMotorFerdig = false;
+    }
+    delay(500);
+    }
+}
+
+
+//Setter ny sluttid for timer
+void settTimer(){
+  timerFerdig = millis() + (antTrykk * venteTid);
+}
+
+
+//Sjekker om timer er ferdig ved å se om millis er større en timer, så lenge timer er større enn 0
+bool erTimerFerdig(){
+  return millis() > timerFerdig && timerFerdig > 0 ;
+}
+
+
+//Leser av modus-knappen og sjekker om den leser av det motsatte av det den var satt til - altså om den har blitt endret
+//Hvis det stemmer tilbakestilles timer og antall trykk
+//Hvis det er en endring fra automatisk til manuell, blir erMotorFerdig satt til false, slik at motoren slår seg på igjen 
+void erTypeValgEndret(){
+
+  if (digitalRead(typeValgPin) == LOW && !typeValgStatus) {
+    typeValgStatus = true;
+
+    timerFerdig = 0L;
+    antTrykk = 0;
+    
+  } else if (digitalRead(typeValgPin) == HIGH && typeValgStatus) {
+
+    typeValgStatus = false;
+    erMotorFerdig = false;
+
+    timerFerdig = 0L;
+    antTrykk = 0;  
+
+  }
+}
+
+
+void slaaPaaMotor() {
+  digitalWrite(motorPin, HIGH);
+}
+
+void slaaAvMotor() {
+  digitalWrite(motorPin, LOW);
+}
+
+
+
+
+
+
+void kjoereVifte(){
+
+  //Hvis manuell, det ikke er satt en timer, og erMotorFerdig fortsatt er false
+  if (!typeValgStatus && timerFerdig == 0 && !erMotorFerdig){
+    slaaPaaMotor();
+  }
+
+  //Hvis automatisk, og det ikke finnes timer
+  else if (typeValgStatus && timerFerdig == 0){
+    //Hvis det er god luft, så slås den av, hvis ikke så slås den på 
+    if (erGodLuft()){ 
+      slaaAvMotor();
+    } else {
+      slaaPaaMotor();
+    }
+  }
+
+  //Hvis timer er ferdig...
+  else if (erTimerFerdig()){
+    //Og den står på manuell, så blir motoren slått av og erMotorFerdig blir true, altså den skal ikke slås på igjen 
+    if (!typeValgStatus){
+      slaaAvMotor();
+      erMotorFerdig = true;
+    }
+
+    //Ellers om den står på automatisk, så styrer sensormålinger
+    else if (erGodLuft()){
+      slaaAvMotor();
+    }
+    else if (!erGodLuft()) {
+      slaaPaaMotor();
+    }
+
+
+  }
+
+  //Hvis timer ikke er ferdig enda, så blir motoren slått på uavhengig av modus
+  else {
+    slaaPaaMotor();
+  }
+}
+   
+
+
+//Leser inn fra luftkvalitetssensor og sjekker om den overstrider grensen eller ikke
+//Returnerer true for god luftkvalitet og false for dårlig. 
+
+bool erGodLuft(){
+  int sensorlesning = analogRead(MQ135_SENSOR);
+  if (sensorlesning > Luftkvalitet_Grense){
+    return false;
+  }
+  else {
+    return true;
+  }
+  
+}
+
+//SJekker om modus er endret, om tidsinnstillingene har endret seg (klikket)
+//Oppdaterer antall klikk etter tiden som har gått og oppdaterer diodene
+//Til slutt kjøerer viften avhengig av øvrig betingelser. 
+
+void loop(){
+  erTypeValgEndret();
+  erKnappTrykket();
+  justerKlikkEtterTid();
+  oppdaterLys();  
+  kjoereVifte();
+
+  
+  
+  
+
+}
